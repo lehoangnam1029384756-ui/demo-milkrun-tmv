@@ -1,19 +1,20 @@
 import streamlit as st
 import pandas as pd
 import requests
+import folium
+from streamlit_folium import st_folium
 
 # Cấu hình web
 st.set_page_config(page_title="Demo Milk-Run", layout="wide")
-st.title("🚛 Hệ thống xếp tuyến Milk-Run tự động (Bản đồ thực tế)")
+st.title("🚛 Hệ thống xếp tuyến Milk-Run tự động (Bản đồ trực quan)")
 
-# 1. ĐỌC DỮ LIỆU TỪ EXCEL
-
+# 1. ĐỌC DỮ LIỆU TỪ EXCEL (Đã tắt cache để dữ liệu luôn mới)
 def load_data():
     df_ncc = pd.read_excel('MilkRun_Data.xlsx', sheet_name='nha_cung_cap')
     df_donhang = pd.read_excel('MilkRun_Data.xlsx', sheet_name='don_hang')
     df_xe = pd.read_excel('MilkRun_Data.xlsx', sheet_name='xe_tai')
     
-    # Xử lý tọa độ để tránh lỗi định dạng
+    # Xử lý tọa độ 
     df_ncc['Vĩ độ (Lat)'] = df_ncc['Vĩ độ (Lat)'].astype(str).str.replace(',', '.').astype(float)
     df_ncc['Kinh độ (Long)'] = df_ncc['Kinh độ (Long)'].astype(str).str.replace(',', '.').astype(float)
     return df_ncc, df_donhang, df_xe
@@ -31,11 +32,11 @@ if st.sidebar.checkbox("3. Xem năng lực đội xe"):
 st.write("---")
 st.subheader("Bấm nút bên dưới để hệ thống quét bản đồ và tính tuyến đường")
 
-# 2. CHẠY THUẬT TOÁN ĐỊNH TUYẾN
+# 2. CHẠY THUẬT TOÁN ĐỊNH TUYẾN VÀ VẼ BẢN ĐỒ
 if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
-    with st.spinner("Đang kết nối bản đồ thực tế và xếp xe..."):
+    with st.spinner("Đang kết nối bản đồ thực tế, xếp xe và vẽ lộ trình..."):
         try:
-            # A. Tính tổng nhu cầu (số Pallet) cần gom ở mỗi nhà cung cấp
+            # Tính tổng nhu cầu (số Pallet)
             demands = [0] * len(df_ncc)
             for index, row in df_donhang.iterrows():
                 ma_ncc = row['Mã NCC']
@@ -44,27 +45,25 @@ if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
                 if len(idx_ncc) > 0:
                     demands[idx_ncc[0]] += pallet
 
-            # B. Lấy ma trận khoảng cách từ bản đồ OSRM (Open Source Routing Machine)
+            # Lấy ma trận khoảng cách từ OSRM
             coords = ";".join([f"{lon},{lat}" for lon, lat in zip(df_ncc['Kinh độ (Long)'], df_ncc['Vĩ độ (Lat)'])])
             url = f"http://router.project-osrm.org/table/v1/driving/{coords}?annotations=distance"
             headers = {'User-Agent': 'MilkRunDemo/1.0'}
             response = requests.get(url, headers=headers).json()
             
-            # Chuyển đổi từ mét sang km
             distance_matrix = []
             for row in response['distances']:
                 distance_matrix.append([int(val / 1000) for val in row])
 
-            # C. Thuật toán tự chia tuyến (Greedy/Nearest Neighbor Routing)
+            # Thuật toán tự chia tuyến
             vehicle_capacities = df_xe['Trọng tải (Số Pallet tối đa)'].tolist()
             num_vehicles = len(vehicle_capacities)
-            
             unvisited = [i for i in range(1, len(df_ncc)) if demands[i] > 0]
             routes = []
             
             for v_id in range(num_vehicles):
                 capacity = vehicle_capacities[v_id]
-                current_node = 0  # Bắt đầu từ Nhà máy (Index 0)
+                current_node = 0  
                 route_path = [0]
                 route_load = 0
                 route_dist = 0
@@ -72,16 +71,13 @@ if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
                 while unvisited:
                     best_node = None
                     best_dist = float('inf')
-                    
-                    # Tìm nhà cung cấp gần nhất mà xe còn chở được
                     for node in unvisited:
                         if demands[node] <= capacity - route_load:
                             if distance_matrix[current_node][node] < best_dist:
                                 best_dist = distance_matrix[current_node][node]
                                 best_node = node
-                    
                     if best_node is None:
-                        break # Xe đã đầy hoặc không chở nổi kiện hàng tiếp theo
+                        break 
                         
                     route_path.append(best_node)
                     route_load += demands[best_node]
@@ -89,7 +85,6 @@ if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
                     current_node = best_node
                     unvisited.remove(best_node)
                     
-                # Tính đường quay về nhà máy
                 if len(route_path) > 1:
                     route_dist += distance_matrix[current_node][0]
                     route_path.append(0)
@@ -100,9 +95,37 @@ if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
                         'dist': route_dist
                     })
 
-            # D. In kết quả ra màn hình web
+            # TẠO BẢN ĐỒ TRỰC QUAN
             if routes:
-                st.success("🎉 Đã tính toán xong! Dưới đây là lộ trình tối ưu nhất dựa trên bản đồ thực tế:")
+                st.success("🎉 Đã tính toán xong! Xem thông số lộ trình và bản đồ thực tế bên dưới:")
+                
+                # Khởi tạo bản đồ trung tâm tại Nhà máy TMV
+                depot_lat = df_ncc.iloc[0]['Vĩ độ (Lat)']
+                depot_lon = df_ncc.iloc[0]['Kinh độ (Long)']
+                m = folium.Map(location=[depot_lat, depot_lon], zoom_start=11)
+                
+                # Cắm cờ đỏ cho Nhà máy
+                folium.Marker(
+                    [depot_lat, depot_lon],
+                    popup=f"<b>{df_ncc.iloc[0]['Tên Cơ Sở']}</b>",
+                    icon=folium.Icon(color="red", icon="home"),
+                    tooltip="Nhà máy TMV"
+                ).add_to(m)
+                
+                # Cắm cờ xanh cho các Nhà cung cấp
+                for i in range(1, len(df_ncc)):
+                    if demands[i] > 0:
+                        folium.Marker(
+                            [df_ncc.iloc[i]['Vĩ độ (Lat)'], df_ncc.iloc[i]['Kinh độ (Long)']],
+                            popup=f"<b>{df_ncc.iloc[i]['Tên Cơ Sở']}</b><br>Cần lấy: {demands[i]} Pallet",
+                            icon=folium.Icon(color="blue", icon="info-sign"),
+                            tooltip=df_ncc.iloc[i]['Tên Cơ Sở']
+                        ).add_to(m)
+
+                # Màu sắc phân biệt cho các tuyến xe khác nhau
+                colors = ['blue', 'green', 'purple', 'orange', 'darkred']
+                
+                # In thông số và Vẽ nét nối lộ trình
                 for r in routes:
                     v_id = r['v_id']
                     path_names = [df_ncc.iloc[n]['Tên Cơ Sở'] for n in r['path']]
@@ -112,13 +135,27 @@ if st.button("🚀 CHẠY THUẬT TOÁN MILK-RUN THỰC TẾ"):
                     st.write(f"- 📦 Số hàng gom được: **{r['load']} / {vehicle_capacities[v_id]} Pallet**")
                     st.write(f"- 🛣️ Quãng đường di chuyển: **{r['dist']} km**")
                     st.write("---")
+                    
+                    # Lấy danh sách tọa độ để vẽ đường
+                    path_coords = [[df_ncc.iloc[n]['Vĩ độ (Lat)'], df_ncc.iloc[n]['Kinh độ (Long)']] for n in r['path']]
+                    folium.PolyLine(
+                        path_coords,
+                        color=colors[v_id % len(colors)],
+                        weight=4,
+                        opacity=0.8,
+                        tooltip=f"Tuyến xe {v_id + 1}"
+                    ).add_to(m)
+                
+                # Hiển thị bản đồ lên web
+                st.write("### 🗺️ BẢN ĐỒ LỘ TRÌNH MILK-RUN")
+                st_folium(m, width=1000, height=600)
                 
                 if unvisited:
                     st.warning(f"⚠️ Còn {len(unvisited)} nhà cung cấp chưa được gom hàng do đội xe không đủ tải trọng!")
                 else:
                     st.balloons()
             else:
-                st.error("⚠️ Không thể tìm được đường! Vui lòng kiểm tra lại dữ liệu xe.")
+                st.error("⚠️ Không tìm được đường! Vui lòng kiểm tra lại tải trọng xe.")
         
         except Exception as e:
-            st.error(f"⚠️ Có lỗi trong quá trình quét bản đồ: {e}")
+            st.error(f"⚠️ Có lỗi xảy ra trong quá trình tính toán và vẽ bản đồ: {e}")
